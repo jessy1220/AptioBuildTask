@@ -1,0 +1,254 @@
+{
+    // See https://go.microsoft.com/fwlink/?LinkId=733558
+    // for the documentation about the tasks.json format
+    "version": "2.0.0",
+    // ========== Required Build Tool Defines ==========
+    // Get_AptioV_Version checks that aptio.json "env" (next to this tasks.json) has a value for each define below; missing ones are asked for in the terminal and saved back to aptio.json.
+    // Add more defines separated by commas, e.g. "APTIO_TOOLS_ROOT,COX64DIR,COX86DIR,EWDK_DIR,CCX86DIR"
+    // APTIO_TOOLS_ROOT = the folder that holds all AptioV tools (e.g. C:/AptioV); TOOLS_DIR and JAVA_HOME are derived from it by default
+    "options": {
+      "env": {
+        "APTIO_REQUIRED": "APTIO_TOOLS_ROOT,COX64DIR,COX86DIR,EWDK_DIR"
+      }
+    },
+    "tasks": [
+      // ========== AMI Tasks ==========
+      // Get_AptioV_Version
+      {
+        "label": "Get_AptioV_Version",
+        "hide": true,
+        "type": "shell",
+        "options": {
+          "shell": {
+            "executable": "powershell.exe"
+          },
+          "cwd": "${workspaceFolder}"
+        },
+        "command": [
+                    // Loads aptio.json from the VS Code user folder next to this tasks.json (created on first run, migrating .vscode/aptio.json and .aptio.vebmap), lists *.veb and AptioV tool folders, then saves the picks
+                    "function Select-Item([string]$title, [string[]]$items, [string]$last) {\n",
+                    "  if ($items.Count -eq 0) { Write-Error ('No ' + $title + ' found'); exit 1 }\n",
+                    "  $def = [Math]::Max(0, [Array]::IndexOf($items, $last))\n",
+                    "  if ($items.Count -eq 1) { Write-Host ($title + ': ' + $items[0]); return $items[0] }\n",
+                    "  Write-Host ''; Write-Host ('Select ' + $title + ':') -ForegroundColor Cyan\n",
+                    "  for ($i = 0; $i -lt $items.Count; $i++) {\n",
+                    "    $mark = ' '; if ($i -eq $def) { $mark = '*' }\n",
+                    "    Write-Host ('  ' + $mark + ' [' + ($i + 1) + '] ' + $items[$i])\n",
+                    "  }\n",
+                    "  while ($true) {\n",
+                    "    $ans = Read-Host ('Enter 1-' + $items.Count + ' (Enter = ' + ($def + 1) + ')')\n",
+                    "    if ([string]::IsNullOrWhiteSpace($ans)) { return $items[$def] }\n",
+                    "    $n = 0\n",
+                    "    if ([int]::TryParse($ans, [ref]$n) -and $n -ge 1 -and $n -le $items.Count) { return $items[$n - 1] }\n",
+                    "    Write-Host 'Invalid selection.' -ForegroundColor Yellow\n",
+                    "  }\n",
+                    "}\n",
+                    // Re-indents PowerShell 5.1 ConvertTo-Json output to 2 spaces
+                    "function Format-Json([string]$json) {\n",
+                    "  $i = 0\n",
+                    "  $out = foreach ($l in ($json -split '\\r?\\n')) {\n",
+                    "    $t = $l.Trim(); if ($t -eq '') { continue }\n",
+                    "    if ($t -match '^[\\}\\]]') { $i-- }\n",
+                    // \\x22 is a double quote; literal double quotes get stripped when VS Code passes the command to powershell.exe
+                    // Collapsed by the command line: runs of spaces inside strings become one space, so build the indent with a multiplier
+                    "    (' ' * (2 * $i)) + ($t -replace '^(\\x22[^\\x22]*\\x22):\\s+', '$1: ')\n",
+                    "    if ($t -match '[\\{\\[]$') { $i++ }\n",
+                    "  }\n",
+                    "  $out -join [Environment]::NewLine\n",
+                    "}\n",
+                    // Workspace root has *.veb -> AMI (aptio) build process; otherwise -> Dell build process (nothing to prepare here)
+                    "$vebs = @(Get-ChildItem -LiteralPath '${workspaceFolder}' -Filter '*.veb' -File | ForEach-Object { $_.BaseName } | Sort-Object)\n",
+                    "if ($vebs.Count -eq 0) { Write-Host 'No .veb file in the workspace root: using the Dell build process' -ForegroundColor Cyan; exit 0 }\n",
+                    // aptio.json: 'current' = last selected VEB; 'vebMap' remembers each VEB's tool (delete an entry to re-select); paths support {Workspace} {VEB} {Version} {AptioTools}
+                    "$cfgFile = Join-Path $env:APPDATA 'Code/User/aptio.json'\n",
+                    // Move the old per-workspace .vscode/aptio.json to the user folder
+                    "if (-not (Test-Path $cfgFile) -and (Test-Path '.vscode/aptio.json')) { Move-Item '.vscode/aptio.json' $cfgFile; Write-Host ('Moved .vscode/aptio.json to ' + $cfgFile) -ForegroundColor Cyan }\n",
+                    "$cfg = $null; if (Test-Path $cfgFile) { try { $cfg = Get-Content $cfgFile -Raw | ConvertFrom-Json } catch { Write-Host ($cfgFile + ' is invalid, recreating it') -ForegroundColor Yellow } }\n",
+                    // The required defines (APTIO_REQUIRED at the top of this file) are not pre-filled; they are asked for below
+                    "if (-not $cfg) {\n",
+                    "  $cfg = [pscustomobject][ordered]@{\n",
+                    "    current     = ''\n",
+                    "    vebMap      = [pscustomobject]@{}\n",
+                    "    search      = [pscustomobject][ordered]@{ toolsPrefix = 'Aptio_5.x_TOOLS_JRE_' }\n",
+                    "    env         = [pscustomobject][ordered]@{\n",
+                    "      TOOLS_DIR = '{AptioTools}/BuildTools'\n",
+                    "      JAVA_HOME = '{AptioTools}/VisualeBios/zulu/bin'\n",
+                    "      VEB       = '{Workspace}/{VEB}'\n",
+                    "    }\n",
+                    "    pathPrepend = @('JAVA_HOME', 'VEB')\n",
+                    "    pathAppend  = @('TOOLS_DIR', 'COX64DIR', 'COX86DIR', 'EWDK_DIR')\n",
+                    "  }\n",
+                    "}\n",
+                    "if (-not $cfg.env) { $cfg | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) -Force }\n",
+                    // Migrate the old search.toolsRoot to env.APTIO_TOOLS_ROOT
+                    "if ($cfg.search -and $cfg.search.PSObject.Properties['toolsRoot']) {\n",
+                    "  if (-not ([string]$cfg.env.APTIO_TOOLS_ROOT).Trim()) { $cfg.env | Add-Member -NotePropertyName APTIO_TOOLS_ROOT -NotePropertyValue ([string]$cfg.search.toolsRoot) -Force }\n",
+                    "  $cfg.search.PSObject.Properties.Remove('toolsRoot')\n",
+                    "}\n",
+                    "function Save-Config {\n",
+                    "  $raw  = $cfg | ConvertTo-Json -Depth 5\n",
+                    "  $json = Format-Json $raw; try { if (-not ($json | ConvertFrom-Json)) { $json = $raw } } catch { $json = $raw }\n",
+                    "  [IO.File]::WriteAllText($cfgFile, $json)\n",
+                    "}\n",
+                    // Check the required build tool defines (APTIO_REQUIRED at the top of this file) before anything else; ask for any that are missing or empty
+                    "$required = @([string]$env:APTIO_REQUIRED -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })\n",
+                    "if ($required.Count -eq 0) { Write-Host 'APTIO_REQUIRED is not set in tasks.json options.env, nothing to check' -ForegroundColor Yellow }\n",
+                    "$suggest = @{\n",
+                    "  APTIO_TOOLS_ROOT = 'C:/AptioV'\n",
+                    "  COX64DIR  = 'C:/WinDDK/7600.16385.1/bin/x86/amd64'\n",
+                    "  COX86DIR  = 'C:/WinDDK/7600.16385.1/bin/x86/x86'\n",
+                    "  EWDK_DIR  = 'C:/AptioV/Compilers/EWDK_1703'\n",
+                    "}\n",
+                    "$missing = @($required | Where-Object { -not $cfg.env.PSObject.Properties[$_] -or -not ([string]$cfg.env.$_).Trim() })\n",
+                    "if ($missing.Count -gt 0) {\n",
+                    "  Write-Host ''; Write-Host ('Missing build tool defines in ' + $cfgFile + ': ' + ($missing -join ', ')) -ForegroundColor Yellow\n",
+                    "  Write-Host 'Placeholders {Workspace} {VEB} {Version} {AptioTools} can be used; those paths are checked after the AptioV Tools version is selected' -ForegroundColor DarkGray\n",
+                    "  foreach ($n in $missing) {\n",
+                    "    $def = [string]$suggest[$n]\n",
+                    "    while ($true) {\n",
+                    "      $q = 'Enter ' + $n; if ($def) { $q += ' (Enter = ' + $def + ')' }\n",
+                    "      $v = ([string](Read-Host $q)).Trim().Trim([char]34).Trim()\n",
+                    "      if (-not $v) { $v = $def }\n",
+                    "      if (-not $v) { Write-Host '  A value is required.' -ForegroundColor Yellow; continue }\n",
+                    "      $p = $v.Replace('{Workspace}', '${workspaceFolder}')\n",
+                    "      if ($p.Contains('{') -or (Test-Path -LiteralPath $p)) { break }\n",
+                    "      $ok = Read-Host ('  ' + $p + ' does not exist. Use it anyway? (y/N)')\n",
+                    "      if ($ok -match '^[yY]') { break }\n",
+                    "    }\n",
+                    "    $cfg.env | Add-Member -NotePropertyName $n -NotePropertyValue $v -Force\n",
+                    "  }\n",
+                    "  Save-Config\n",
+                    "}\n",
+                    // Migrate from the old .aptio.vebmap file
+                    "$oldMap = '.vscode/.aptio.vebmap'\n",
+                    "if (Test-Path $oldMap) {\n",
+                    "  Get-Content $oldMap | ForEach-Object { $kv = $_.Split('=', 2); if ($kv.Count -eq 2 -and $kv[0].Trim()) {\n",
+                    "    $k = $kv[0].Trim(); $v = $kv[1].Trim()\n",
+                    "    if ($k -eq '@Current') { if (-not $cfg.current) { $cfg.current = $v } }\n",
+                    "    elseif (-not $cfg.vebMap.PSObject.Properties[$k]) { $cfg.vebMap | Add-Member -NotePropertyName $k -NotePropertyValue $v }\n",
+                    "  } }\n",
+                    "  Remove-Item $oldMap\n",
+                    "}\n",
+                    "Remove-Item '.vscode/.aptio.veb', '.vscode/.aptio.version' -ErrorAction SilentlyContinue\n",
+                    "$prefix = $cfg.search.toolsPrefix\n",
+                    "$toolsRoot = ([string]$cfg.env.APTIO_TOOLS_ROOT).Replace('{Workspace}', '${workspaceFolder}')\n",
+                    "$tools  = @(Get-ChildItem -LiteralPath $toolsRoot -Directory -Filter ($prefix + '*') -ErrorAction SilentlyContinue | ForEach-Object { $_.Name.Substring($prefix.Length) } | Sort-Object)\n",
+                    "$lastVeb = [string]$cfg.current\n",
+                    "$lastVer = ''; if ($lastVeb -and $cfg.vebMap.PSObject.Properties[$lastVeb]) { $lastVer = [string]$cfg.vebMap.$lastVeb }\n",
+                    "$vebName = Select-Item 'VEB' $vebs $lastVeb\n",
+                    "$known = ''; if ($cfg.vebMap.PSObject.Properties[$vebName]) { $known = [string]$cfg.vebMap.$vebName }\n",
+                    "if ($known -and ($tools -contains $known)) {\n",
+                    "  $ver = $known\n",
+                    "  Write-Host ('Using remembered AptioV Tools ' + $ver + ' for ' + $vebName + ' (edit ' + $cfgFile + ' to change)') -ForegroundColor Green\n",
+                    "} else {\n",
+                    "  $ver = Select-Item ('AptioV Tools (' + $toolsRoot + '/' + $prefix + '*)') $tools $lastVer\n",
+                    "  $cfg.vebMap | Add-Member -NotePropertyName $vebName -NotePropertyValue $ver -Force\n",
+                    "}\n",
+                    "$cfg.current = $vebName\n",
+                    // Now that the tools version is known, check the required paths that use placeholders
+                    "$aptioTools = $toolsRoot + '/' + $prefix + $ver\n",
+                    "function Expand-Path([string]$p) { $p.Replace('{Workspace}', '${workspaceFolder}').Replace('{VEB}', $vebName).Replace('{Version}', $ver).Replace('{AptioTools}', $aptioTools) }\n",
+                    "foreach ($n in $required) {\n",
+                    "  $v = [string]$cfg.env.$n\n",
+                    "  if ($v.Contains('{') -and -not (Test-Path -LiteralPath (Expand-Path $v))) { Write-Host ('Warning: ' + $n + ' = ' + (Expand-Path $v) + ' does not exist (edit ' + $cfgFile + ' to change)') -ForegroundColor Yellow }\n",
+                    "}\n",
+                    "Save-Config\n",
+                    "Write-Host ('VEB=' + $vebName + '  AptioV_Version=' + $ver)\n"
+                  ],
+        "presentation": {
+            "reveal": "always",
+            "focus": true,
+            "close": true
+        }
+      },
+      // Build
+      {
+        "label": "Build",
+        "type": "shell",
+        "options": {
+          "shell": {
+            "executable": "powershell.exe"
+          },
+          "cwd": "${workspaceFolder}"
+        },
+        "command": [
+                    "$StartTime = Get-Date \r\n",
+                    // Workspace root has *.veb -> AMI (aptio) build process; otherwise -> Dell build process
+                    "if (@(Get-ChildItem -LiteralPath '${workspaceFolder}' -Filter '*.veb' -File).Count -eq 0) {\n",
+                    // TODO Dell build process. The previous DT/NB build was:
+                    //   cd ${workspaceFolder}/DellPkgs/DellPlatformPkgs/<DT|NB>/<VEB>/ ; .\builda.bat -r | -dda | -cleanall  (log to ./Build.log)
+                    "  Write-Host 'No .veb file in the workspace root: Dell build process (not implemented yet)' -ForegroundColor Yellow\n",
+                    "  pause; exit 0\n",
+                    "}\n",
+                    "$cfgFile = Join-Path $env:APPDATA 'Code/User/aptio.json'\n",
+                    "$cfg = Get-Content $cfgFile -Raw -ErrorAction Stop | ConvertFrom-Json\n",
+                    "$vebName             = [string]$cfg.current;",
+                    "$env:AptioV_Version  = ''; if ($vebName -and $cfg.vebMap.PSObject.Properties[$vebName]) { $env:AptioV_Version = [string]$cfg.vebMap.$vebName }\n",
+                    "if (-not $vebName -or -not $env:AptioV_Version) { Write-Error ('No VEB/tool selected in ' + $cfgFile); pause; exit 1 }\n",
+                    "$missing = @([string]$env:APTIO_REQUIRED -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -and -not ([string]$cfg.env.$_).Trim() })\n",
+                    "if ($missing.Count -gt 0) { Write-Error ('Missing build tool defines in ' + $cfgFile + ': ' + ($missing -join ', ')); pause; exit 1 }\n",
+                    "$aptioTools = ([string]$cfg.env.APTIO_TOOLS_ROOT).Replace('{Workspace}', '${workspaceFolder}') + '/' + $cfg.search.toolsPrefix + $env:AptioV_Version\n",
+                    "function Expand-Path([string]$p) { $p.Replace('{Workspace}', '${workspaceFolder}').Replace('{VEB}', $vebName).Replace('{Version}', $env:AptioV_Version).Replace('{AptioTools}', $aptioTools) }\n",
+                    "('Start Build Time: ' + $StartTime.ToString()) | Out-File ./Build.log \r\n",
+                    "foreach ($p in $cfg.env.PSObject.Properties) { Set-Item -Path ('env:' + $p.Name) -Value (Expand-Path $p.Value) }\n",
+                    "$pre  = @($cfg.pathPrepend | ForEach-Object { [Environment]::GetEnvironmentVariable($_) } | Where-Object { $_ })\n",
+                    "$post = @($cfg.pathAppend  | ForEach-Object { [Environment]::GetEnvironmentVariable($_) } | Where-Object { $_ })\n",
+                    "$env:PATH = (($pre + @($env:PATH) + $post) -join ';') + ';'\n",
+                    "$choices = [System.Management.Automation.Host.ChoiceDescription[]]@('&Re-Build', '&Clean')\n",
+                    "$sel = $Host.UI.PromptForChoice('', 'Select AMI build action:', $choices, 0)\n",
+                    "switch ($sel) {\n",
+                    "  0 {\n",
+                    "    make rebuild 2>&1 | % ToString | Tee-Object ./Build.log\n",
+                    "    $EndTime = Get-Date \r\n",
+                    "    ('Total Build Time: ' + ($EndTime - $StartTime).ToString()) | Out-File ./Build.log -Append \r\n",
+                    "    pause \n",
+                    "    $env:BUILD_DIR = 'empty'\n",
+                    "    $env:PATH = $env:PATH + ';' + $env:BUILD_DIR + ';'\n",
+                    "    make clean\n",
+                    "  }\n",
+                    "  1 { make clean; }\n",
+                    "}\n",
+                  ],
+        "group": { "kind": "build", "isDefault": true },
+        "presentation": {
+            "reveal": "always",
+            "focus": true,
+            "close": true
+        },
+        "dependsOn": [ "Get_AptioV_Version" ],
+        "dependsOrder": "sequence"
+      },
+    ],
+    "inputs": [
+      {
+        "type": "pickString",
+        "id": "Project_Name",
+        "description": "Select the Project Package",
+        "options": [
+          "MapleCrbGrgHPkg",
+        ],
+        "default": "component"
+      },
+      {
+        "type": "pickString",
+        "id": "AGS_Build_Action",
+        "description": "Select the build action",
+        "options": [
+          "Release",
+          "Debug",
+          "Clean"
+        ],
+        "default": "Release"
+      },
+      {
+        "type": "pickString",
+        "id": "AMI_Build_Action",
+        "description": "Select the build action",
+        "options": [
+          "Re-Build",
+          "Clean"
+        ],
+        "default": "Re-Build"
+      }
+    ]
+}
