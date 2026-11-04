@@ -3,7 +3,7 @@
     // for the documentation about the tasks.json format
     "version": "2.0.0",
     // ========== Required Build Tool Defines ==========
-    // Get_AptioV_Version checks that aptio.json "env" (next to this tasks.json) has a value for each define below; missing ones are asked for in the terminal and saved back to aptio.json.
+    // Build checks that aptio.json "env" (next to this tasks.json) has a value for each define below; missing ones are asked for in the terminal and saved back to aptio.json.
     // Add more defines separated by commas, e.g. "APTIO_TOOLS_ROOT,COX64DIR,COX86DIR,EWDK_DIR,CCX86DIR"
     // APTIO_TOOLS_ROOT = the folder that holds all AptioV tools (e.g. C:/AptioV); TOOLS_DIR and JAVA_HOME are derived from it by default
     "options": {
@@ -12,11 +12,10 @@
       }
     },
     "tasks": [
-      // ========== AMI Tasks ==========
-      // Get_AptioV_Version
+      // ========== Build / Git Sync ==========
+      // Build: asks Build or Git Sync first; Build = AMI build (workspace root has *.veb) or Dell (AGS) build
       {
-        "label": "Get_AptioV_Version",
-        "hide": true,
+        "label": "Build",
         "type": "shell",
         "options": {
           "shell": {
@@ -25,6 +24,29 @@
           "cwd": "${workspaceFolder}"
         },
         "command": [
+                    // Select the task first: Build (AMI or Dell, by *.veb in the workspace root) or Git Sync
+                    "Write-Host '---- task ----' -ForegroundColor Cyan;",
+                    "Write-Host '[1] Build *'; Write-Host '[2] Git Sync (current branch + submodules)'; Write-Host '[0] Exit';",
+                    "do { $mode = Read-Host 'Select task (0-2, Enter=1)'; if ($mode -eq '') { $mode = '1' } } until ($mode -match '^[0-2]$');",
+                    "if ($mode -eq '0') { Write-Host '[Info] Exit.' -ForegroundColor Yellow; exit 0 };\n",
+                    // ========== Git Sync: current branch + submodules (no checkout) ==========
+                    "if ($mode -eq '2') {\n",
+                    "$ErrorActionPreference = 'Continue';",
+                    "if (Get-Variable PSNativeCommandUseErrorActionPreference -Scope Global -ErrorAction SilentlyContinue) { $Global:PSNativeCommandUseErrorActionPreference = $false };",
+                    "$br = [string](git rev-parse --abbrev-ref HEAD 2>$null); if ($LASTEXITCODE -ne 0 -or -not $br) { Write-Host '[Error] Not a git repository' -ForegroundColor Red; pause; exit 1 }; $br = $br.Trim();",
+                    "Write-Host ('[Info] Current branch: ' + $br) -ForegroundColor Cyan;",
+                    "Write-Host '[Step] git fetch -p' -ForegroundColor Yellow;",
+                    "git fetch -p --progress 2>&1 | % ToString;",
+                    "Write-Host '[Step] git pull origin' -ForegroundColor Yellow;",
+                    "git pull origin $br 2>&1 | % ToString; if ($LASTEXITCODE -ne 0) { Write-Host ('[Error] ' + 'pull failed (exit ' + $LASTEXITCODE + ')') -ForegroundColor Red; pause; exit 1 };",
+                    "Write-Host '[Step] git submodule sync --recursive' -ForegroundColor Yellow;",
+                    "git submodule sync --recursive 2>&1 | % ToString; if ($LASTEXITCODE -ne 0) { Write-Host ('[Error] ' + 'submodule sync failed (exit ' + $LASTEXITCODE + ')') -ForegroundColor Red; pause; exit 1 };",
+                    "Write-Host '[Step] git submodule update --init -f --recursive' -ForegroundColor Yellow;",
+                    "git submodule update --init -f --recursive 2>&1 | % ToString; if ($LASTEXITCODE -ne 0) { Write-Host ('[Error] ' + 'submodule update failed (exit ' + $LASTEXITCODE + ')') -ForegroundColor Red; pause; exit 1 };",
+                    "Write-Host ('[Done] Branch ' + $br + ' synced.') -ForegroundColor Green;",
+                    "pause\n",
+                    "exit 0\n",
+                    "}\n",
                     // Loads aptio.json from the VS Code user folder next to this tasks.json (created on first run, migrating .vscode/aptio.json and .aptio.vebmap), lists *.veb and AptioV tool folders, then saves the picks
                     "function Select-Item([string]$title, [string[]]$items, [string]$last) {\n",
                     "  if ($items.Count -eq 0) { Write-Error ('No ' + $title + ' found'); exit 1 }\n",
@@ -57,16 +79,18 @@
                     "  $out -join [Environment]::NewLine\n",
                     "}\n",
                     // Workspace root has *.veb -> AMI (aptio) build process; otherwise -> Dell build process (nothing to prepare here)
-                    "$vebs = @(Get-ChildItem -LiteralPath '${workspaceFolder}' -Filter '*.veb' -File | ForEach-Object { $_.BaseName } | Sort-Object)\n",
-                    "if ($vebs.Count -eq 0) { Write-Host 'No .veb file in the workspace root: using the Dell build process' -ForegroundColor Cyan; exit 0 }\n",
+                    // Filter by Extension: -Filter '*.veb' would also match '.veb_' due to Windows 8.3 short names
+                    "$vebs = @(Get-ChildItem -LiteralPath '${workspaceFolder}' -File | Where-Object { $_.Extension -eq '.veb' } | ForEach-Object { $_.BaseName } | Sort-Object)\n",
+                    // AMI only (workspace root has *.veb): check the build tool defines and select VEB / AptioV Tools; Dell skips this
+                    "if ($vebs.Count -gt 0) {\n",
                     // aptio.json: 'current' = last selected VEB; 'vebMap' remembers each VEB's tool (delete an entry to re-select); paths support {Workspace} {VEB} {Version} {AptioTools}
                     "$cfgFile = Join-Path $env:APPDATA 'Code/User/aptio.json'\n",
                     // Move the old per-workspace .vscode/aptio.json to the user folder
                     "if (-not (Test-Path $cfgFile) -and (Test-Path '.vscode/aptio.json')) { Move-Item '.vscode/aptio.json' $cfgFile; Write-Host ('Moved .vscode/aptio.json to ' + $cfgFile) -ForegroundColor Cyan }\n",
                     "$cfg = $null; if (Test-Path $cfgFile) { try { $cfg = Get-Content $cfgFile -Raw | ConvertFrom-Json } catch { Write-Host ($cfgFile + ' is invalid, recreating it') -ForegroundColor Yellow } }\n",
                     // The required defines (APTIO_REQUIRED at the top of this file) are not pre-filled; they are asked for below
-                    "if (-not $cfg) {\n",
-                    "  $cfg = [pscustomobject][ordered]@{\n",
+                    // Template for a new aptio.json; missing top-level sections are also filled in (e.g. a file that only has the Dell 'dell' section)
+                    "$tpl = [pscustomobject][ordered]@{\n",
                     "    current     = ''\n",
                     "    vebMap      = [pscustomobject]@{}\n",
                     "    search      = [pscustomobject][ordered]@{ toolsPrefix = 'Aptio_5.x_TOOLS_JRE_' }\n",
@@ -77,8 +101,8 @@
                     "    }\n",
                     "    pathPrepend = @('JAVA_HOME', 'VEB')\n",
                     "    pathAppend  = @('TOOLS_DIR', 'COX64DIR', 'COX86DIR', 'EWDK_DIR')\n",
-                    "  }\n",
                     "}\n",
+                    "if (-not $cfg) { $cfg = $tpl } else { foreach ($p in $tpl.PSObject.Properties) { if (-not $cfg.PSObject.Properties[$p.Name]) { $cfg | Add-Member -NotePropertyName $p.Name -NotePropertyValue $p.Value } } }\n",
                     "if (-not $cfg.env) { $cfg | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) -Force }\n",
                     // Migrate the old search.toolsRoot to env.APTIO_TOOLS_ROOT
                     "if ($cfg.search -and $cfg.search.PSObject.Properties['toolsRoot']) {\n",
@@ -153,32 +177,154 @@
                     "  if ($v.Contains('{') -and -not (Test-Path -LiteralPath (Expand-Path $v))) { Write-Host ('Warning: ' + $n + ' = ' + (Expand-Path $v) + ' does not exist (edit ' + $cfgFile + ' to change)') -ForegroundColor Yellow }\n",
                     "}\n",
                     "Save-Config\n",
-                    "Write-Host ('VEB=' + $vebName + '  AptioV_Version=' + $ver)\n"
-                  ],
-        "presentation": {
-            "reveal": "always",
-            "focus": true,
-            "close": true
-        }
-      },
-      // Build
-      {
-        "label": "Build",
-        "type": "shell",
-        "options": {
-          "shell": {
-            "executable": "powershell.exe"
-          },
-          "cwd": "${workspaceFolder}"
-        },
-        "command": [
+                    "Write-Host ('VEB=' + $vebName + '  AptioV_Version=' + $ver)\n",
+                    "}\n",
                     "$StartTime = Get-Date \r\n",
                     // Workspace root has *.veb -> AMI (aptio) build process; otherwise -> Dell build process
-                    "if (@(Get-ChildItem -LiteralPath '${workspaceFolder}' -Filter '*.veb' -File).Count -eq 0) {\n",
-                    // TODO Dell build process. The previous DT/NB build was:
-                    //   cd ${workspaceFolder}/DellPkgs/DellPlatformPkgs/<DT|NB>/<VEB>/ ; .\builda.bat -r | -dda | -cleanall  (log to ./Build.log)
-                    "  Write-Host 'No .veb file in the workspace root: Dell build process (not implemented yet)' -ForegroundColor Yellow\n",
-                    "  pause; exit 0\n",
+                    // Filter by Extension: -Filter '*.veb' would also match '.veb_' due to Windows 8.3 short names
+                    "if (@(Get-ChildItem -LiteralPath '${workspaceFolder}' -File | Where-Object { $_.Extension -eq '.veb' }).Count -eq 0) {\n",
+                    // ========== Dell (AGS) build process ==========
+                    // Build action: All = Clean -> Release_DRB -> Debug_DRB -> Release_DPF -> Debug_DPF
+                    "$ws      = '${workspaceFolder}';",
+                    // Selections are saved in aptio.json 'dell': 'last' = last choices (per workspace), 'cbsMap' = project -> AmdCbsPkg path
+                    "$cfgFile = Join-Path $env:APPDATA 'Code/User/aptio.json';",
+                    "$cfg = $null; if (Test-Path $cfgFile) { try { $cfg = Get-Content $cfgFile -Raw | ConvertFrom-Json } catch { Write-Host ('[Error] ' + $cfgFile + ' is invalid, please fix or delete it') -ForegroundColor Red; pause; exit 1 } };",
+                    "if (-not $cfg) { $cfg = New-Object PSObject };",
+                    "if (-not $cfg.dell) { $cfg | Add-Member -NotePropertyName dell -NotePropertyValue (New-Object PSObject) -Force };",
+                    "if (-not $cfg.dell.last) { $cfg.dell | Add-Member -NotePropertyName last -NotePropertyValue (New-Object PSObject) -Force };",
+                    "if (-not $cfg.dell.cbsMap) { $cfg.dell | Add-Member -NotePropertyName cbsMap -NotePropertyValue (New-Object PSObject) -Force };",
+                    "$last = $cfg.dell.last; $map = $cfg.dell.cbsMap;",
+                    // Same 2-space JSON formatting as Get_AptioV_Version
+                    "function Format-Json([string]$json) { $i = 0; $out = foreach ($l in ($json -split '\\r?\\n')) { $t = $l.Trim(); if ($t -eq '') { continue }; if ($t -match '^[\\}\\]]') { $i-- }; (' ' * (2 * $i)) + ($t -replace '^(\\x22[^\\x22]*\\x22):\\s+', '$1: '); if ($t -match '[\\{\\[]$') { $i++ } }; $out -join [Environment]::NewLine };",
+                    "$saveCfg = { $raw = $cfg | ConvertTo-Json -Depth 6; $json = Format-Json $raw; try { if (-not ($json | ConvertFrom-Json)) { $json = $raw } } catch { $json = $raw }; [IO.File]::WriteAllText($cfgFile, $json) };",
+                    // Terminal menu helper: shows options, Enter = last choice (or default), 0 = Exit, saves the choice
+                    "$pick = { param($title, $opts, $key, $def)",
+                    "  $cur = if ($last.$key) { $last.$key } else { $def }; $d = [array]::IndexOf($opts, $cur) + 1;",
+                    "  Write-Host ('---- ' + $title + ' ----') -ForegroundColor Cyan;",
+                    "  for ($i = 0; $i -lt $opts.Count; $i++) { Write-Host ('[' + ($i + 1) + '] ' + $opts[$i] + $(if ($i + 1 -eq $d) { ' *' } else { '' })) };",
+                    "  Write-Host '[0] Exit';",
+                    "  do { $s = Read-Host ('Select ' + $title + ' (0-' + $opts.Count + $(if ($d) { ', Enter=' + $d } else { '' }) + ')'); if ($s -eq '' -and $d) { $s = [string]$d } } until ($s -match '^\\d+$' -and [int]$s -ge 0 -and [int]$s -le $opts.Count);",
+                    "  if ([int]$s -eq 0) { Write-Host '[Info] Exit.' -ForegroundColor Yellow; exit 0 };",
+                    "  $v = $opts[[int]$s - 1];",
+                    "  $last | Add-Member -NotePropertyName $key -NotePropertyValue $v -Force;",
+                    "  & $saveCfg;",
+                    "  return $v };",
+                    "$act     = & $pick 'build action' @('Release_DRB', 'Debug_DRB', 'Release_DPF', 'Debug_DPF', 'All', 'Clean') ('AGS|Action|' + $ws) 'Release_DPF';",
+                    // Platform: AMD = PLATFORM_SILICON_NAME is AGESA_*, Intel = everything else
+                    "$plat    = & $pick 'platform' @('AMD', 'Intel') ('AGS|Platform|' + $ws) 'AMD';",
+                    "$isAmd   = $plat -eq 'AMD';",
+                    // Projects = DellPlatformPkgs/<type>/<Pkg> with builda.bat and DellPlatformPkg.dsc, filtered by platform; parent folder gives motherboard type
+                    "$projs   = @(Get-ChildItem ($ws + '/DellPkgs/DellPlatformPkgs') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Get-ChildItem $_.FullName -Directory } | Where-Object { (Test-Path (Join-Path $_.FullName 'builda.bat')) -and (Test-Path (Join-Path $_.FullName 'DellPlatformPkg.dsc')) -and ([bool](Select-String -Path (Join-Path $_.FullName 'DellPlatformPkg.dsc') -Pattern '^\\s*DEFINE\\s+PLATFORM_SILICON_NAME\\s*=\\s*AGESA_' -Quiet) -eq $isAmd) } | Sort-Object Name);",
+                    "if ($projs.Count -eq 0) { Write-Host ('[Error] No ' + $plat + ' project with builda.bat found in DellPkgs/DellPlatformPkgs') -ForegroundColor Red; pause; exit 1 };",
+                    "Write-Host ('[Info] Platform=' + $plat) -ForegroundColor Cyan;",
+                    // Last project per workspace and platform
+                    "$lastKey = if ($isAmd) { 'AGS|' + $ws } else { 'AGS|Intel|' + $ws };",
+                    "$defIdx = 0; for ($i = 0; $i -lt $projs.Count; $i++) { if ($projs[$i].Name -eq $last.$lastKey) { $defIdx = $i + 1 } };",
+                    "if ($projs.Count -eq 1) { $sel = 1 } else {",
+                    "  Write-Host '---- project ----' -ForegroundColor Cyan;",
+                    "  for ($i = 0; $i -lt $projs.Count; $i++) { Write-Host ('[' + ($i + 1) + '] ' + $projs[$i].Name + ' (' + $projs[$i].Parent.Name + ')' + $(if ($i + 1 -eq $defIdx) { ' *' } else { '' })) };",
+                    "  Write-Host '[0] Exit';",
+                    "  $prompt = 'Select project (0-' + $projs.Count + $(if ($defIdx) { ', Enter=' + $defIdx } else { '' }) + ')';",
+                    "  do { $sel = Read-Host $prompt; if ($sel -eq '' -and $defIdx) { $sel = [string]$defIdx } } until ($sel -match '^\\d+$' -and [int]$sel -ge 0 -and [int]$sel -le $projs.Count);",
+                    "  if ([int]$sel -eq 0) { Write-Host '[Info] Exit.' -ForegroundColor Yellow; exit 0 } };",
+                    "$last | Add-Member -NotePropertyName $lastKey -NotePropertyValue $projs[[int]$sel - 1].Name -Force;",
+                    "& $saveCfg;",
+                    "$proj    = $projs[[int]$sel - 1].Name;",
+                    "$mb      = $projs[[int]$sel - 1].Parent.Name;",
+                    "$env:Motherboard_Type = $mb;",
+                    "Write-Host ('[Info] Project=' + $proj + ' Motherboard_Type=' + $mb) -ForegroundColor Cyan;",
+                    // Mount U (No = -nou), SimNow (AMD only, Yes = -simnow), Dump performance (Yes = -dp); asked before any cleanup
+                    "$mountU  = & $pick 'Mount U drive (No = -nou)' @('Yes', 'No') ('AGS|MountU|' + $ws) 'No';",
+                    "$simNow  = if ($isAmd) { & $pick 'SimNow build (Yes = -simnow)' @('Yes', 'No') ('AGS|SimNow|' + $ws) 'No' } else { 'No' };",
+                    "$dumpPerf = & $pick 'Dump performance (Yes = -dp)' @('Yes', 'No') ('AGS|DumpPerf|' + $ws) 'No';",
+                    // AmdCbsPkg Build cleanup only for AMD; silicon comes from <proj>/DellPlatformPkg.dsc PLATFORM_SILICON_NAME
+                    "if ($isAmd) {",
+                    "$dsc = Join-Path $projs[[int]$sel - 1].FullName 'DellPlatformPkg.dsc';",
+                    "$sm = Select-String -Path $dsc -Pattern '^\\s*DEFINE\\s+PLATFORM_SILICON_NAME\\s*=\\s*(\\S+)' | Select-Object -First 1;",
+                    "$silicon = $sm.Matches[0].Groups[1].Value;",
+                    // Auto-detect: Amd/<silicon>/**/AmdCbsPkg
+                    "$auto = $null;",
+                    "$hits = @(Get-ChildItem ($ws + '/Amd/' + $silicon) -Directory -Recurse -Depth 2 -Filter 'AmdCbsPkg' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($ws.Length + 1) -replace '\\\\', '/' });",
+                    "if ($hits.Count -eq 1) { $auto = $hits[0]; Write-Host ('[Info] Detected PLATFORM_SILICON_NAME=' + $silicon + ' -> ' + $auto) }",
+                    "else { Write-Host ('[Warn] PLATFORM_SILICON_NAME=' + $silicon + ' matches ' + $hits.Count + ' AmdCbsPkg folders') -ForegroundColor Yellow };",
+                    // Project -> AmdCbsPkg path map (aptio.json dell.cbsMap); detected or user-selected values are saved back
+                    "$cbs = $map.$proj;",
+                    "$save = $false;",
+                    "if ($auto -and $auto -ne $cbs) { if ($cbs) { Write-Host ('[Info] Update ' + $proj + ': ' + $cbs + ' -> ' + $auto) -ForegroundColor Yellow }; $cbs = $auto; $save = $true };",
+                    "if (-not $cbs) {",
+                    "  $cands = @(Get-ChildItem ($ws + '/Amd') -Directory -Recurse -Depth 3 -Filter 'AmdCbsPkg' -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($ws.Length + 1) -replace '\\\\', '/' });",
+                    "  if ($cands.Count -eq 0) { Write-Host '[Error] No AmdCbsPkg found under Amd/' -ForegroundColor Red; pause; exit 1 };",
+                    "  Write-Host ('[Info] No AmdCbsPkg path saved for ' + $proj + ', please select:') -ForegroundColor Yellow;",
+                    "  for ($i = 0; $i -lt $cands.Count; $i++) { Write-Host ('[' + ($i + 1) + '] ' + $cands[$i]) };",
+                    "  Write-Host '[0] Exit';",
+                    "  do { $c = Read-Host ('Select AmdCbsPkg (0-' + $cands.Count + ')') } until ($c -match '^\\d+$' -and [int]$c -ge 0 -and [int]$c -le $cands.Count);",
+                    "  if ([int]$c -eq 0) { Write-Host '[Info] Exit.' -ForegroundColor Yellow; exit 0 };",
+                    "  $cbs = $cands[[int]$c - 1]; $save = $true };",
+                    "if ($save) {",
+                    "  $map | Add-Member -NotePropertyName $proj -NotePropertyValue $cbs -Force;",
+                    "  & $saveCfg;",
+                    "  Write-Host ('[Info] Saved ' + $proj + '=' + $cbs + ' to ' + $cfgFile) };",
+                    "$buildDir = $ws + '/' + $cbs + '/Build';",
+                    "if (Test-Path $buildDir) { Remove-Item -Path $buildDir -Recurse -Force; Write-Host ('[Info] Removed: ' + $buildDir) } else { Write-Host ('[Info] Not found, skip: ' + $buildDir) };",
+                    "} else { Write-Host '[Info] Intel project, skip AmdCbsPkg Build cleanup' -ForegroundColor Yellow };",
+                    "$projDrb = $proj -replace 'Pkg$', 'DrbPkg';",
+                    "$nouArg  = if ($mountU -eq 'No') { '-nou' } else { '' };",
+                    "$simArg  = if ($simNow -eq 'Yes') { '-simnow' } else { '' };",
+                    "$dpArg   = if ($dumpPerf -eq 'Yes') { '-dp' } else { '' };",
+                    "$pkgDir  = $ws + '/DellPkgs/DellPlatformPkgs/' + $mb + '/' + $proj;",
+                    "Write-Host ('[Info] action=' + $act + ' mb=' + $mb + ' proj=' + $proj + ' projDrb=' + $projDrb);",
+                    "Write-Host ('[Info] pkgDir=' + $pkgDir);",
+                    "if (-not (Test-Path $pkgDir)) { Write-Host ('[Error] pkgDir not found: ' + $pkgDir) -ForegroundColor Red; pause; exit 1 };",
+                    "cd $pkgDir\n",
+                    "if (-not (Test-Path .\\builda.bat)) { Write-Host '[Error] builda.bat not found' -ForegroundColor Red; pause; exit 1 };\n",
+                    "$clean   = @{ Name='Clean'; Args=@('-cleanall'); OutPkg=$null; Target=$null };\n",
+                    "$builds  = @(\n",
+                    "  @{ Name='Release_DRB'; Args=@('-drb','-r','-report','-SafeAuthBypass');          Sim=@('-r','-drb'); OutPkg=$projDrb; Target='RELEASE' },\n",
+                    "  @{ Name='Debug_DRB';   Args=@('-drb','-dda','-udc','-report','-SafeAuthBypass'); Sim=@('-drb');      OutPkg=$projDrb; Target='DEBUG'   },\n",
+                    "  @{ Name='Release_DPF'; Args=@('-r','-report','-SafeAuthBypass');                 Sim=@('-r');        OutPkg=$proj;    Target='RELEASE' },\n",
+                    "  @{ Name='Debug_DPF';   Args=@('-dda','-udc','-report','-SafeAuthBypass');        Sim=@();            OutPkg=$proj;    Target='DEBUG'   }\n",
+                    ");\n",
+                    "$actions = switch ($act) {\n",
+                    "  'All'   { @($clean) + $builds }\n",
+                    "  'Clean' { @($clean) }\n",
+                    "  default { @($builds | Where-Object { $_.Name -eq $act }) }\n",
+                    "};\n",
+                    "foreach ($a in $actions) {\n",
+                    "  $name    = $a.Name;\n",
+                    "  $tmpLog  = $ws + '/_build_' + $name + '.log';\n",
+                    "  $argv    = $a.Args;\n",
+                    "  if ($nouArg -ne '') { $argv = $argv + $nouArg };\n",
+                    "  if ($a.OutPkg -and $dpArg -ne '') { $argv = $argv + $dpArg };\n",
+                    "  if ($a.OutPkg -and $simArg -ne '') { $argv = @($simArg) + $argv };\n",
+                    "  Write-Host ('==================== ' + $name + ' ====================');\n",
+                    "  Write-Host ('[Info] cmd: .\\builda.bat ' + ($argv -join ' '));\n",
+                    "  & .\\builda.bat @argv 2>&1 | % ToString | Tee-Object $tmpLog;\n",
+                    "  $rc = $LASTEXITCODE;\n",
+                    "  Write-Host ('[Info] ' + $name + ' exit=' + $rc);\n",
+                    "  if (-not $a.OutPkg) {\n",
+                    "    $logDir  = $ws + '/Build';\n",
+                    "    $logPath = $logDir + '/Clean.log';\n",
+                    "  } else {\n",
+                    "    $tool = $null;\n",
+                    "    if (Test-Path $tmpLog) { $m = Select-String -Path $tmpLog -Pattern 'TOOL_CHAIN_TAG=(\\w+)' | Select-Object -First 1; if ($m) { $tool = $m.Matches[0].Groups[1].Value } };\n",
+                    "    if (-not $tool) { $tool = 'VS2022'; Write-Host '[Warn] TOOL_CHAIN_TAG not found in log, assume VS2022' -ForegroundColor Yellow };\n",
+                    "    $logDir  = $ws + '/Build/' + $mb + '/' + $a.OutPkg + '/' + $a.Target + '_' + $tool;\n",
+                    "    $logPath = $logDir + '/Build.log';\n",
+                    "  };\n",
+                    "  if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null };\n",
+                    "  if (Test-Path $tmpLog) { Move-Item $tmpLog $logPath -Force; Write-Host ('[Info] log -> ' + $logPath) } else { Write-Host ('[Warn] tmp log missing: ' + $tmpLog) -ForegroundColor Yellow };\n",
+                    "  if ($act -ne 'All' -and (Test-Path $logPath)) { Copy-Item $logPath ($pkgDir + '/Build.log') -Force };\n",
+                    "  if ($rc -ne 0) {\n",
+                    "    Write-Host ('[' + $name + '] FAILED (exit=' + $rc + '), stop.') -ForegroundColor Red;\n",
+                    "    break;\n",
+                    "  }\n",
+                    "  if ($rc -eq 0 -and $act -ne 'All' -and $a.OutPkg -and $simArg -ne '') {\n",
+                    "    Write-Host ('[Info] launching SimNow.bat ' + ($a.Sim -join ' '));\n",
+                    "    & .\\SimNow.bat @($a.Sim);\n",
+                    "  }\n",
+                    "}\n",
+                    "pause\n",
+                    "exit 0\n",
                     "}\n",
                     "$cfgFile = Join-Path $env:APPDATA 'Code/User/aptio.json'\n",
                     "$cfg = Get-Content $cfgFile -Raw -ErrorAction Stop | ConvertFrom-Json\n",
@@ -214,41 +360,7 @@
             "reveal": "always",
             "focus": true,
             "close": true
-        },
-        "dependsOn": [ "Get_AptioV_Version" ],
-        "dependsOrder": "sequence"
+        }
       },
-    ],
-    "inputs": [
-      {
-        "type": "pickString",
-        "id": "Project_Name",
-        "description": "Select the Project Package",
-        "options": [
-          "MapleCrbGrgHPkg",
-        ],
-        "default": "component"
-      },
-      {
-        "type": "pickString",
-        "id": "AGS_Build_Action",
-        "description": "Select the build action",
-        "options": [
-          "Release",
-          "Debug",
-          "Clean"
-        ],
-        "default": "Release"
-      },
-      {
-        "type": "pickString",
-        "id": "AMI_Build_Action",
-        "description": "Select the build action",
-        "options": [
-          "Re-Build",
-          "Clean"
-        ],
-        "default": "Re-Build"
-      }
     ]
 }
